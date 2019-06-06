@@ -16,7 +16,7 @@ var p = cs.newPool(SPA.SID.sidQueue);
 global.socketpool = p;
 
 //create a connection context
-var cc = cs.newCC('localhost', 20902, 'root', 'Smash123');
+var cc = cs.newCC('localhost', 20901, 'root', 'Smash123');
 
 //start a socket pool having one session to a remote server
 if (!p.Start(cc, 1)) {

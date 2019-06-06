@@ -50,8 +50,8 @@
     "my_queue": {
       "SvsId": 257,
       "Hosts": [
-        "db_master",
-        "db_master"
+        "hw_0",
+        "hw_0"
       ]
     },
     "masterdb": {
