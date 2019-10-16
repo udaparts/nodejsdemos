@@ -20,8 +20,6 @@ if (!db.Open('sakila', (res, err) => {
             ec: res,
             em: err
         });
-    }, canceled => {
-        console.log(canceled ? 'Request canceled' : 'Session closed');
     })) {
     console.log(db.Socket.Error);
     return;
