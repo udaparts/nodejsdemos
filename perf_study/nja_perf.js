@@ -25,21 +25,18 @@ if (!db.Open('sakila', (res, err) => {
 }
 
 function TestPerf(db) {
-    var stmt = 'SELECT * FROM sakila.actor WHERE actor_id between 11 and 20';
+    var stmt = 'SELECT * FROM sakila.actor WHERE actor_id between 11 and 12';
 	var start = new Date();
-    var count = 100000;
+    var count = 8000;
     for (var n = 0; n < count; ++n) {
         db.Execute(stmt, (res, err, affected, fails, oks, id) => {
 		}, (data) => {
-		}, (meta) => {
 		});
     }
     db.Execute(stmt, (res, err, affected, fails, oks, id) => {
         console.log('Time required: ' + (new Date() - start));
     }, (data) => {
         //console.log(data);
-    }, (meta) => {
-		//console.log(meta);
-	});
+    });
 }
-TestPerf(db);
+setInterval(()=>{TestPerf(db);}, 1000);
