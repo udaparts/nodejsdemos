@@ -672,14 +672,23 @@ class CHandler {
         return new CSocket(this.handler.getSocket());
     }
 
+    /**
+     * A property {int} A service id
+     */
     get SvsId() {
         return this.handler.getSvsId();
     }
 
+    /**
+     * A property {int} the number of requests queued
+     */
     get RequestsQueued() {
         return this.handler.getRequestsQueued();
     }
 
+    /**
+     * A property {boolean} true if requests are beening batched
+     */
     get Batching() {
         return this.handler.isBatching();
     }
@@ -695,7 +704,11 @@ class CHandler {
     get RouteeResult() {
         return this.handler.isRouteeResult();
     }
-
+    /**
+     * Check if two handlers are the same
+     * @param {CHandler} h An async request handler
+     * @returns true if they are the same, and false if they are not the same
+     */
     IsSame(h) {
         if (!h) return false;
         return this.handler.isSame(h.handler);
@@ -709,10 +722,26 @@ class CHandler {
         this.handler.AbortDequeuedMessage();
     }
 
+    /**
+     * Start to batch a number of requests manually
+     * @returns true if successful, and false if failed
+    */
+    StartBatching() {
+        return this.handler.StartBatching();
+    }
+
+    /**
+     * Abort requests batched
+     */
     AbortBatching() {
         return this.handler.AbortBatching();
     }
 
+    /**
+     * Commit batching a number of requests and send them to server in one single shot
+     * @param {boolean} serverCommit true if returning results will be returned from server in batch, and false if not
+     * @returns true if successful, and false if failed
+     */
     CommitBatching(serverCommit = false) {
         return this.handler.CommitBatching(serverCommit);
     }
@@ -721,44 +750,117 @@ class CHandler {
         return this.handler.Dispose();
     }
 
-    StartBatching() {
-        return this.handler.StartBatching();
+    /**
+     * Send an interrupt request onto server with the fastest priority
+     * @param {bigint} options bit-wise flags to be sent to server
+     * @returns true if successful, and false if failed
+     * @remarks The request is used to tell server side to stop loop like file file downloading and records fetching as soon as possible if implemented
+     */
+    Interrupt(options) {
+        assert(Number.isSafeInteger(options));
+        return this.handler.Interrupt(options);
     }
 
+    /**
+     *  Send a request onto a remote server for processing, and return immediately without blocking
+     * @param {unsigned short} reqId An unique request id within a service handler
+     * @param {CUQueue, null or undefined} buff null, undefined or an instance of CUQueue
+     * @param {function} cb A callback for tracking an instance of CUQueue containing an expected result
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if successful, and false if communication channel is not sendable
+     */
     SendRequest(reqId, buff, cb, discarded = null, serverException = null) {
+        if (reqId <= exports.BaseID.idReservedTwo)
+            throw 'Request id must be larger than 0x2001';
         return this.handler.SendRequest(reqId, buff, cb, discarded, serverException);
     }
 
     //Promise version
-    sendRequest(reqId, buff, cb, discarded = null, serverException = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
-        assert(serverException === null || serverException === undefined || typeof serverException === 'function');
+
+    /**
+     * Send a request onto a remote server for processing, and return immediately without blocking
+     * @param {unsigned short} reqId An unique request id within a service handler
+     * @param {CUQueue, null or undefined} buff null, undefined or an instance of CUQueue
+     * @returns A promise for an instance of CUQueue
+     * @throws A server, socket close or request canceled exception
+     */
+    sendRequest(reqId, buff) {
+        if (reqId <= exports.BaseID.idReservedTwo)
+            throw 'Request id must be larger than 0x2001';
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.SendRequest(reqId, buff, (q, id) => {
-                if (cb) ret = cb(q, id);
-                res(ret);
+                res(q, id);
             }, (canceled, id) => {
-                if (discarded) ret = discarded(canceled, id);
-                if (ret === undefined) ret = (canceled ? 'Request canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, reqId, canceled);
             }, (errMsg, errCode, errWhere, id) => {
-                if (serverException) ret = serverException(errMsg, errCode, errWhere, id);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg,
-                    stack: errWhere,
-                    reqId: id
-                };
-                rej(ret);
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false, reqId);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, reqId);
             }
         });
+    }
+
+    /**
+     * set a server exception for promise reject
+     * @param {reject} rej promise reject function
+     * @param {string} errMsg an error message
+     * @param {int} errCode an error code
+     * @param {string} errWhere location where exception happens at server side
+     * @param {unsigned short} id an unique request id within a service handler
+     */
+    set_exception(rej, errMsg, errCode, errWhere, id) {
+        rej({ ec: errCode, em: errMsg, where: errWhere, reqId: id });
+    }
+
+    /**
+     * set a cancel or communication channel close exception for promise reject
+     * @param {reject} rej promise reject function
+     * @param {unsigned short} req_id an unique request id within a service handler
+     * @param {boolean} canceled true if the request is canceled, false if communication channel is closed
+     */
+    set_aborted(rej, req_id, canceled) {
+        var ret;
+        if (canceled) {
+            ret = { ec: -1002, em: 'Request canceled', reqId: req_id, before: false };
+        }
+        else {
+            var error = this.Socket.Error;
+            if (!error.ec) {
+                error.ec = -1000;
+                error.em = 'Session closed after sending the request';
+            }
+            ret = { ec: error.ec, em: error.em, reqId: req_id, before: false };
+        }
+        rej(ret);
+    }
+
+    /**
+     * raise a communication channel close exception for promise reject
+     * @param {reject} rej promise reject function
+     * @param {unsigned short} req_id An unique request id within a service handler
+     */
+    raise(rej, req_id) {
+        var error = this.Socket.Error;
+        if (!error.ec) {
+            error.ec = -1001;
+            error.em = 'Session already closed before sending the request';
+        }
+        rej({ ec: error.ec, em: error.em, reqId: req_id, before: true });
+    }
+
+    /**
+     * raise a communication channel close exception
+     * @param {unsigned short} req_id An unique request id within a service handler
+     */
+    throw(req_id) {
+        var error = this.Socket.Error;
+        if (!error.ec) {
+            error.ec = -1001;
+            error.em = 'Session already closed before sending the request';
+        }
+        throw { ec: error.ec, em: error.em, reqId: req_id, before: true };
     }
 }
 
@@ -796,6 +898,8 @@ exports.BaseID = {
     idStartQueue: 25,
     idStopQueue: 26,
     idRoutePeerUnavailable: 27,
+    idDequeueBatchConfirmed: 28,
+    idInterrupt: 29,
     idReservedOne: 0x100,
     idReservedTwo: 0x2001
 };
@@ -830,242 +934,316 @@ class CAsyncQueue extends CHandler {
         assert(h.getSvsId() === exports.SID.sidQueue);
     }
 
+    /**
+     * A property{int} Batch dequeue size in bytes
+     */
     get DequeueBatchSize() {
         return this.handler.getDeqBatchSize();
     }
-
+    /**
+     * A property{boolean} true if server is set to notify if there is a message available. Otherwise, it is false
+     */
     get EnqueueNotified() {
         return this.handler.getEnqNotified();
     }
 
+    /**
+     * A write-only property{function} A callback for tracking dequeued messages or other returning results
+     */
     set ResultReturned(rr) {
         return this.handler.setResultReturned(rr);
     }
 
+    /**
+     * Pack a message into the handler internal buffer to prepare for coming EqueueBatch or enqueueBatch
+     * @param {any} reqId A request id for the message
+     * @param {any} buff A instance of CUQueue containing a message, null or undefined
+     */
     BatchMessage(reqId, buff) {
-        return this.handler.BatchMessage(reqId, buff);
+        this.handler.BatchMessage(reqId, buff);
     }
 
-    GetKeys(cb, discarded = null) {
-        return this.handler.GetKeys(cb, discarded);
+    /**
+     * Send a request to server for querying all opened keys that are corresponding server queue files
+     * @param {function} cb A callback for tracking an array of returning keys
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if succsessful, and false if communication channel is closed or not sendable
+     */
+    GetKeys(cb, discarded = null, serverException = null) {
+        return this.handler.GetKeys(cb, discarded, serverException);
     }
 
-    StartTrans(key, cb = null, discarded = null) {
-        return this.handler.StartTrans(key, cb, discarded);
+    /**
+     * Start enqueuing messages with transaction style. Currently, total size of queued messages must be less than 4 G bytes
+     * @param {string} key An ASCII string to identify a server queue file
+     * @param {function} cb A callback for tracking returning error code, which can be one of QUEUE_OK, QUEUE_TRANS_ALREADY_STARTED, and so on
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if communication channel is sendable, and false if communication channel is not sendable
+     */
+    StartTrans(key, cb = null, discarded = null, serverException = null) {
+        return this.handler.StartTrans(key, cb, discarded, serverException);
     }
 
-    EndTrans(rollback = false, cb = null, discarded = null) {
-        return this.handler.EndTrans(rollback, cb, discarded);
+    /**
+     * End enqueuing messages with transaction style. Currently, total size of queued messages must be less than 4 G bytes
+     * @param {boolean} rollback true for rollback, and false for committing
+     * @param {function} cb A callback for tracking returning error code, which can be one of QUEUE_OK, QUEUE_TRANS_NOT_STARTED_YET, and so on
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if communication channel is sendable, and false if communication channel is not sendable
+     */
+    EndTrans(rollback = false, cb = null, discarded = null, serverException = null) {
+        return this.handler.EndTrans(rollback, cb, discarded, serverException);
     }
 
-    Close(key, cb = null, discarded = null, permanent = false) {
-        return this.handler.Close(key, cb, discarded, permanent);
+    /**
+     * Try to close or delete a persistent queue opened at server side
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {function} cb A callback for tracking returning error code, which can be one of QUEUE_OK, QUEUE_DEQUEUING, and so on
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {boolean} permanent true for deleting a queue file, and false for closing a queue file
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if communication channel is sendable, and false if communication channel is not sendable
+     */
+    Close(key, cb = null, discarded = null, permanent = false, serverException = null) {
+        return this.handler.Close(key, cb, discarded, permanent, serverException);
     }
 
-    Flush(key, cb = null, discarded = null, option = exports.CS.Queue.Optimistic.oMemoryCached) {
-        return this.handler.Flush(key, cb, discarded, option);
+    /**
+     * Flush memory data into either operation system memory or hard disk, and return message count and queue file size in bytes. Note the method only returns message count and queue file size in bytes if the option is oMemoryCached
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {function} cb A callback for tracking returning message count and queue file size in bytes
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {int} option one of tagOptimistic options, oMemoryCached, oSystemMemoryCached and oDiskCommitted
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if communication channel is sendable, and false if communication channel is not sendable
+     */
+    Flush(key, cb = null, discarded = null, option = exports.CS.Queue.Optimistic.oMemoryCached, serverException = null) {
+        return this.handler.Flush(key, cb, discarded, option, serverException);
     }
 
-    Dequeue(key, cb = null, discarded = null, timeout = 0) {
-        return this.handler.Dequeue(key, cb, discarded, timeout);
+    /**
+     * Dequeue messages from a persistent message queue file at server side in batch
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {function} cb A callback for tracking data like remaining message count within a server queue file, queue file size in bytes, message dequeued within this batch and bytes dequeued within this batch
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {int} timeout A time-out number in milliseconds
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if communication channel is sendable, and false if communication channel is not sendable
+     */
+    Dequeue(key, cb = null, discarded = null, timeout = 0, serverException = null) {
+        return this.handler.Dequeue(key, cb, discarded, timeout, serverException);
     }
 
-    Enqueue(key, reqId, buff, cb = null, discarded = null) {
-        return this.handler.Enqueue(key, reqId, buff, cb, discarded);
+    /**
+     *  Enqueue a message into a queue file identified by a key
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {unsigned short} reqId  A unsigned short number to identify a message
+     * @param {CUQueue} buff an instance of SPA.CUQueue containing a message, null or undefined
+     * @param {function} cb A callback for tracking returning index
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if communication channel is sendable, and false if communication channel is not sendable
+     */
+    Enqueue(key, reqId, buff, cb = null, discarded = null, serverException = null) {
+        return this.handler.Enqueue(key, reqId, buff, cb, discarded, serverException);
     }
 
-    EnqueueBatch(key, cb = null, discarded = null) {
-        return this.handler.EnqueueBatch(key, cb, discarded);
+    /**
+     * Enqueue a batch of messages into a queue file identified by a key
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {function} cb  A callback for tracking returning index
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns true if communication channel is sendable, and false if communication channel is not sendable
+     */
+    EnqueueBatch(key, cb = null, discarded = null, serverException = null) {
+        return this.handler.EnqueueBatch(key, cb, discarded, serverException);
     }
 
     //Promise
-    getKeys(cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * Query queue keys opened at server side
+     * @returns An array of string keys by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    getKeys() {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.GetKeys((vKeys) => {
-                if (cb) ret = cb(vKeys);
-                if (ret === undefined) ret = vKeys;
-                res(ret);
+                res(vKeys);
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'GetKeys canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idGetKeys, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idGetKeys);
             }
         });
     }
 
     //Promise
-    close(key, permanent = false, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * Try to close a persistent queue opened at server side
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {boolean} permanent true for deleting a queue file, and false for closing a queue file.
+     * @returns An error code by promise, which can be one of QUEUE_OK, QUEUE_DEQUEUING, and so on
+     * @throws A server, socket close or request canceled exception
+     */
+    close(key, permanent = false) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.Close(key, (errCode) => {
-                if (cb) ret = cb(errCode);
-                if (ret === undefined) ret = errCode;
-                res(ret);
+                res(errCode);
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Close canceled' : 'Connection closed');
-                rej(ret);
-            }, permanent);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idClose, canceled);
+            }, permanent, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
+            });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idClose);
             }
         });
     }
 
     //Promise
-    startTrans(key, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * Start to enqueue messages with transaction style. Currently, total size of queued messages must be less than 4 G bytes
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @returns An error code by promise, which can be one of QUEUE_OK, QUEUE_TRANS_ALREADY_STARTED, and so on
+     * @throws A server, socket close or request canceled exception
+     */
+    startTrans(key) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.StartTrans(key, (errCode) => {
-                if (cb) ret = cb(errCode);
-                if (ret === undefined) ret = errCode;
-                res(ret);
+                res(errCode);
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'StartTrans canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idStartTrans, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idStartTrans);
             }
         });
     }
 
     //Promise
-    endTrans(rollback = false, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * End enqueuing messages with transaction style. Currently, total size of queued messages must be less than 4 G bytes
+     * @param {boolean} rollback true for rollback, and false for committing.
+     * @returns An error code by promise, which can be one of QUEUE_OK, QUEUE_TRANS_NOT_STARTED_YET, and so on
+     * @throws A server, socket close or request canceled exception
+     */
+    endTrans(rollback = false) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.EndTrans(rollback, (errCode) => {
-                if (cb) ret = cb(errCode);
-                if (ret === undefined) ret = errCode;
-                res(ret);
+                res(errCode);
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'EndTrans canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idEndTrans, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idEndTrans);
             }
         });
     }
 
     //Promise
-    flush(key, option = exports.CS.Queue.Optimistic.oMemoryCached, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * Just get message count and queue file size in bytes only
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {int} option one of options, oMemoryCached, oSystemMemoryCached and oDiskCommitted
+     * @returns message count and queue file size in bytes by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    flush(key, option = exports.CS.Queue.Optimistic.oMemoryCached) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.Flush(key, (messages, fileSize) => {
-                if (cb) ret = cb(messages, fileSize);
-                if (ret === undefined) ret = {
-                    msgs: messages,
-                    fsize: fileSize
-                };
-                res(ret);
+                res({ msgs: messages, fsize: fileSize });
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Flush canceled' : 'Connection closed');
-                rej(ret);
-            }, option);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idFlush, canceled);
+            }, option, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
+            });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idFlush);
             }
         });
     }
 
-    //Promise
-    enqueue(key, reqId, buff, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    //Promise disabled because it is not useful at current time
+    /**
+     * Enqueue a message to a server queue file
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {unsigned short} reqId A request id for a message
+     * @param {CUQueue} buff An instance of CUQueue containing the message, null or undefined
+     * @returns An index by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    /*
+    enqueue(key, reqId, buff, cb = null, discarded = null, serverException = null) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.Enqueue(key, reqId, buff, (index) => {
-                if (cb) ret = cb(index);
-                if (ret === undefined) ret = index;
-                res(ret);
+                res(index);
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Enqueue canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idEnqueue, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idEnqueue);
             }
         });
     }
+    */
 
     //Promise
-    enqueueBatch(key, cb = null, discarded = null) {
+    /**
+     * Enqueue a batch of messages into a server queue file
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @returns An index by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    enqueueBatch(key, cb = null, discarded = null, serverException = null) {
         assert(cb === null || cb === undefined || typeof cb === 'function');
         assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+        assert(serverException === null || serverException === undefined || typeof serverException === 'function');
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.EnqueueBatch(key, (index) => {
-                if (cb) ret = cb(index);
-                if (ret === undefined) ret = index;
-                res(ret);
+                res(index);
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'EnqueueBatch canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idEnqueueBatch, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idEnqueueBatch);
             }
         });
     }
 
     //Promise
-    dequeue(key, timeout = 0, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * 
+     * @param {string} key An ASCII string for identifying a queue at server side
+     * @param {int} timeout A time-out number in millseconds
+     * @returns Remaining message count within a server queue file, queue file size in bytes, messages dequeued and bytes dequeued within this batch by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    dequeue(key, timeout = 0) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.Dequeue(key, (messages, fileSize, messagesDequeued, bytes) => {
-                if (cb) ret = cb(messages, fileSize, messagesDequeued, bytes);
-                if (ret === undefined) ret = {
-                    msgs: messages,
-                    fsize: fileSize,
-                    msgsDequeued: messagesDequeued,
-                    bytes: bytes
-                };
-                res(ret);
+                res({ msgs: messages, fsize: fileSize, msgsDequeued: messagesDequeued, bytes: bytes });
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Dequeue canceled' : 'Connection closed');
-                rej(ret);
-            }, timeout);
+                this.set_aborted(rej, exports.CS.Queue.ReqIds.idDequeue, canceled);
+            }, timeout, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
+            });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.CS.Queue.ReqIds.idDequeue);
             }
         });
     }
@@ -1077,77 +1255,113 @@ class CAsyncFile extends CHandler {
         assert(h.getSvsId() === exports.SID.sidFile);
     }
 
+    /**
+     * A property{int} the number of files queued for transferring
+     */
     get FilesQueued() {
         return this.handler.getFilesQueued();
     }
 
-    Upload(localFile, remoteFile, cb = null, progress = null, discarded = null) {
-        return this.handler.Upload(localFile, remoteFile, cb, progress, discarded);
+    /**
+     * A property{int} the number of files streamed at max. It defaults to 1
+     */
+    get FilesStreamed() {
+        return this.handler.getFilesStreamed();
     }
 
-    Download(localFile, remoteFile, cb = null, progress = null, discarded = null) {
-        return this.handler.Download(localFile, remoteFile, cb, progress, discarded);
+    /**
+     * A property{int} set a max number of  files streamed. The max number could be 32 at hard-coded
+     * @remarks Increasing the property could speed up files downloading if there are a lot of small files to be downloaded from remote server
+     */
+    set FilesStreamed(max) {
+        return this.handler.setFilesStreamed(max);
     }
 
+    /**
+     * Post a message for uploading a file onto a remote server
+     * @param {string} localFile A non-empty string path to a local file
+     * @param {string} remoteFile A non-empty string path to a remote file at server side
+     * @param {function} cb A callback for tracking the final result of file uploading containing an error code and an error message
+     * @param {function} progress A callback for file uploading progress
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {int} flags A bit-wsie int flags for opening file options. It could be one or more of these options: exports.File.OpenOption.TRUNCACTED, APPENDED, SHARE_READ and SHARE_WRITE
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns It always returns true
+     */
+    Upload(localFile, remoteFile, cb = null, progress = null, discarded = null, flags = exports.File.OpenOption.TRUNCACTED, serverException = null) {
+        return this.handler.Upload(localFile, remoteFile, cb, progress, discarded, flags, serverException);
+    }
+
+    /**
+     * Post a message for downloading a file from a remote server
+     * @param {string} localFile A non-empty string path to a local file
+     * @param {string} remoteFile A non-empty string path to a remote file at server side
+     * @param {function} cb A callback for tracking the final result of file downloading containing an error code and an error message
+     * @param {function} progress A callback for file downloading progress
+     * @param {function} discarded A callback for tracking communication channel events, close and cancel
+     * @param {int} flags A bit-wsie int flags for opening file options. It could be one or more of these options: exports.File.OpenOption.TRUNCACTED, APPENDED, SHARE_READ and SHARE_WRITE
+     * @param {function} serverException A callback for tracking an exception from server
+     * @returns It always returns true
+     */
+    Download(localFile, remoteFile, cb = null, progress = null, discarded = null, flags = exports.File.OpenOption.TRUNCACTED, serverException = null) {
+        return this.handler.Download(localFile, remoteFile, cb, progress, discarded, flags, serverException);
+    }
+
+    /**
+     * Cancel file transferrings queued
+     * @returns the number of file transferrings canceled
+     */
     Cancel() {
         return this.handler.Cancel();
     }
 
     //Promise version
-    upload(localFile, remoteFile, progress = null, cb = null, discarded = null) {
+    /**
+     * Post a message for uploading a file onto a remote server
+     * @param {string} localFile A non-empty string path to a local file
+     * @param {string} remoteFile A non-empty string path to a remote file at server side
+     * @param {function} progress A callback for file uploading progress
+     * @param {int} flags A bit-wsie int flags for opening file options. It could be one or more of these options: exports.File.OpenOption.TRUNCACTED, APPENDED, SHARE_READ and SHARE_WRITE
+     * @returns A structure for final result of file uploading containing an error code and an error message by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    upload(localFile, remoteFile, progress = null, flags = exports.File.OpenOption.TRUNCACTED) {
         assert(localFile && typeof localFile === 'string');
         assert(remoteFile && typeof remoteFile === 'string');
         assert(progress === null || progress === undefined || typeof progress === 'function');
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
         return new Promise((res, rej) => {
-            var ret;
-            var ok = this.handler.Upload(localFile, remoteFile, (errMsg, errCode, download) => {
-                if (cb) ret = cb(errMsg, errCode, download);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg
-                };
-                res(ret);
+            this.handler.Upload(localFile, remoteFile, (errMsg, errCode, download) => {
+                res({ ec: errCode, em: errMsg });
             }, progress, (canceled, download) => {
-                if (discarded) ret = discarded(canceled, download);
-                if (ret === undefined) ret = (canceled ? 'Upload canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.File.ReqIds.idUpload, canceled);
+            }, flags, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
-            if (!ok) {
-                if (discarded) ret = discarded(false, false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
-            }
         });
     }
 
     //Promise version
-    download(localFile, remoteFile, progress = null, cb = null, discarded = null) {
+    /**
+     * Post a message for downloading a file from a remote server
+     * @param {string} localFile A non-empty string path to a local file
+     * @param {string} remoteFile A non-empty string path to a remote file at server side
+     * @param {function} progress A callback for file downloading progress
+     * @param {int} flags A bit-wsie int flags for opening file options. It could be one or more of these options: exports.File.OpenOption.TRUNCACTED, APPENDED, SHARE_READ and SHARE_WRITE
+     * @returns A structure for final result of file downloading containing an error code and an error message by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    download(localFile, remoteFile, progress = null, flags = exports.File.OpenOption.TRUNCACTED) {
         assert(localFile && typeof localFile === 'string');
         assert(remoteFile && typeof remoteFile === 'string');
         assert(progress === null || progress === undefined || typeof progress === 'function');
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
         return new Promise((res, rej) => {
-            var ret;
-            var ok = this.handler.Download(localFile, remoteFile, (errMsg, errCode, download) => {
-                if (cb) ret = cb(errMsg, errCode, download);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg
-                };
-                res(ret);
+            this.handler.Download(localFile, remoteFile, (errMsg, errCode, download) => {
+                res({ ec: errCode, em: errMsg });
             }, progress, (canceled, download) => {
-                if (discarded) ret = discarded(canceled, download);
-                if (ret === undefined) ret = (canceled ? 'Download canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.File.ReqIds.idDownload, canceled);
+            }, flags, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
-            if (!ok) {
-                if (discarded) ret = discarded(false, true);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
-            }
         });
     }
 }
@@ -1159,236 +1373,315 @@ class CDb extends CHandler {
         assert(sid === exports.SID.sidOdbc || sid === exports.SID.sidSqlite || sid === exports.SID.sidMysql);
     }
 
+    /**
+     * A property{int} A value for database management system. one of exports.DB.ManagementSystem.Sqlite, Mysql, ODBC, MsSQL, Oracle, DB2, PostgreSQL, and MongoDB
+     */
     get DbMS() {
         return this.handler.getDbMS();
     }
 
+    /**
+     * A property{boolean} true if database is connected, and false if database is not opened
+     */
     get Opened() {
         return this.handler.isOpened();
     }
 
-    BeginTrans(isolation = exports.DB.TransIsolation.ReadCommited, cb = null, discarded = null) {
-        return this.handler.BeginTrans(isolation, cb, discarded);
+    /**
+     * Start a manual transaction with a given isolation asynchronously. Note
+     * the transaction will be associated with SocketPro client message queue if
+     * available to avoid possible transaction lose
+     * 
+     * @param {int} isolation a transaction isolation. It defaults to exports.DB.tagTransactionIsolation.tiReadCommited
+     * @param {function} cb a callback for tracking its response result
+     * @param {function} discarded an callback for tracking communication channel events, close and cancel
+     * @param {function} serverException a callback for tracking an exception from server
+     * @returns true if request is successfully sent or queued; and false if request is NOT successfully sent or queued
+     */
+    BeginTrans(isolation = exports.DB.TransIsolation.ReadCommited, cb = null, discarded = null, serverException = null) {
+        return this.handler.BeginTrans(isolation, cb, discarded, serverException);
     }
 
-    Close(cb = null, discarded = null) {
-        return this.handler.Close(cb, discarded);
+    /**
+     * Notify connected remote server to close database connection string
+     * asynchronously
+     * @param {function} cb a callback for closing result, which should be OK always as long as there is network or queue available
+     * @param {function} discarded a callback for tracking communication channel events, close and cancel
+     * @param {function} serverException a callback for tracking an exception from server
+     * @returns true if request is successfully sent or queued; and false if request is NOT successfully sent or queued
+     */
+    Close(cb = null, discarded = null, serverException = null) {
+        return this.handler.Close(cb, discarded, serverException);
     }
 
-    EndTrans(rp = exports.DB.RollbackPlan.rpDefault, cb = null, discarded = null) {
-        return this.handler.EndTrans(rp, cb, discarded);
+    /**
+     * End a manual transaction with a given rollback plan. Note the transaction
+     * will be associated with SocketPro client message queue if available to
+     * avoid possible transaction lose
+     * @param {int} rp plan a schedule about how included transactions should be rollback
+     * at server side. It defaults to exports.DB.tagRollbackPlan.rpDefault
+     * @param {function} cb a callback for tracking its response result
+     * @param {function} discarded an callback for tracking communication channel events, close and cancel
+     * @param {function} serverException a callback for tracking an exception from server
+     * @returns true if request is successfully sent or queued; and false if request is NOT successfully sent or queued
+     */
+    EndTrans(rp = exports.DB.RollbackPlan.rpDefault, cb = null, discarded = null, serverException = null) {
+        return this.handler.EndTrans(rp, cb, discarded, serverException);
     }
 
-    Open(conn, cb = null, discarded = null, flags = 0) {
-        return this.handler.Open(conn, cb, discarded, flags);
+    /**
+     * Open a database connection at server side asynchronously
+     * @param {string} conn a database connection string. The database
+     * connection string can be null, undefined or an empty string if its server side supports
+     * global database connection string
+     * @param {function} cb a callback for database connecting result
+     * @param {function} discarded a callback for tracking communication channel events, close and cancel
+     * @param {int} flags a set of flags transferred to server to indicate how to
+     * build database connection at server side. It defaults to zero
+     * @param {function} serverException a callback for tracking an exception from server
+     */
+    Open(conn, cb = null, discarded = null, flags = 0, serverException = null) {
+        return this.handler.Open(conn, cb, discarded, flags, serverException);
     }
 
-    Prepare(sql, cb = null, discarded = null) {
-        return this.handler.Prepare(sql, cb, discarded);
+    /**
+     * Send a parameterized SQL statement for preparing with a given array of
+     * parameter informations asynchronously
+     * @param {string} sql a parameterized SQL statement
+     * @param {function} cb a callback for SQL preparing result
+     * @param {function} discarded a callback for tracking communication channel events, close and cancel
+     * @param {a[]} arrP a given array of parameter informations. It defaults to an empty array
+     * @param {function} serverException a callback for tracking an exception from server
+     * @returns true if request is successfully sent or queued; and false if
+     * request is NOT successfully sent or queued
+     */
+    Prepare(sql, cb = null, discarded = null, arrP = [], serverException = null) {
+        return this.handler.Prepare(sql, cb, discarded, arrP, serverException);
     }
 
-    Execute(sql_or_arrParam, cb = null, rows = null, rh = null, discarded = null, meta = true) {
-        return this.handler.Execute(sql_or_arrParam, cb, rows, rh, discarded, meta);
+    /**
+     * Process a complex SQL statement which may be combined with multiple basic
+     * SQL statements asynchronously
+     * @param {string, [] or CUQueue} sql_or_arrParam an SQL statement, an array of parameter data, or an instance of CUQueue containing an array of parameters
+     * @param {function} cb a callback for tracking final result
+     * @param {function} rows a callback for tracking record or output parameter returned data
+     * @param {function} rh a callback for tracking row set of header column meta informations
+     * @param {boolean} meta a boolean value for better or more detailed column meta
+     * details such as unique, not null, primary first, and so on. It defaults to true
+     * @param {function} discarded a callback for tracking communication channel events, close and cancel
+     *  @param {function} serverException a callback for tracking an exception from server
+     * @returns true if request is successfully sent or queued; and false if request is NOT successfully sent or queued
+     */
+    Execute(sql_or_arrParam, cb = null, rows = null, rh = null, meta = true, discarded = null, serverException = null) {
+        return this.handler.Execute(sql_or_arrParam, cb, rows, rh, discarded, meta, serverException);
     }
 
-    ExecuteBatch(isolation, sql, paramBuff, cb = null, rows = null, rh = null, batchHeader = null, discarded = null, rp = exports.DB.RollbackPlan.rpDefault, delimiter = ';', meta = true, arrP = []) {
-        return this.handler.ExecuteBatch(isolation, sql, paramBuff, cb, rows, rh, batchHeader, discarded, rp, delimiter, arrP, meta);
+    /**
+     * Execute a batch of SQL statements on one single call
+     * @param {int} isolation a value for manual transaction isolation. Specifically,
+     * there is no manual transaction around the batch SQL statements if it is tiUnspecified
+     * @param {string} sql a SQL statement having a batch of individual SQL statements
+     * @param {[]} paramBuff an array of parameter data which will be bounded to previously prepared parameters.
+     * The array size can be 0 if the given batch SQL statement doesn't having any prepared statement
+     * @param {function} cb a callback for tracking final result
+     * @param {function} rows a callback for receiving records of data
+     * @param {function} rh a callback for tracking row set of header column meta informations
+     * @param {string} delimiter a delimiter string used for separating the batch SQL statements into individual SQL statements at server side
+     * for processing. It defaults to ";"
+     * @param {function} batchHeader a callback for tracking returning batch start error messages
+     * @param {function} discarded a callback for tracking communication channel events, close and cancel
+     * @param {boolean} meta a boolean for better or more detailed column meta details such as unique, not null, primary key, and so on. It defaults to true
+     * @param {int} rp a value for computing how included transactions should be rollback. It defaults to exports.DB.tagRollbackPlan.rpDefault
+     * @param {[]} arrP a given array of parameter informations which may be empty to most of database management systems
+     * @param {boolean} lastInsertId true if last insert id is hoped, and false if last insert id is not expected
+     * @param {function} serverException a callback for tracking an exception from server
+     * @returns true if request is successfully sent or queued; and false if request is NOT successfully sent or queued
+     */
+    ExecuteBatch(isolation, sql, paramBuff, cb = null, rows = null, rh = null, delimiter = ';', batchHeader = null, discarded = null, meta = true, rp = exports.DB.RollbackPlan.rpDefault, arrP = [], lastInsertId = true, serverException = null) {
+        return this.handler.ExecuteBatch(isolation, sql, paramBuff, cb, rows, rh, batchHeader, discarded, rp, delimiter, arrP, meta, lastInsertId, serverException);
     }
 
     //Promise
-    close(cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * Notify connected remote server to close database connection string asynchronously
+     * @returns a promise for execution error information
+     * @throws A server, socket close or request canceled exception
+     */
+    close() {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.Close((errCode, errMsg) => {
-                if (cb) ret = cb(errCode, errMsg);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg
-                };
-                res(ret);
+                res({ ec: errCode, em: errMsg });
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Close canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.DB.ReqIds.idClose, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.DB.ReqIds.idClose);
             }
         });
     }
 
     //Promise
-    prepare(sql, cb = null, discarded = null) {
-        assert(sql && typeof sql === 'string');
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * Send a parameterized SQL statement for preparing with a given array of parameter informations asynchronously
+     * @param {string} sql a parameterized SQL statement
+     * @param {[]} arrP a given array of parameter informations. It defaults to empty array
+     * @returns a promise for execution error information
+     * @throws A server, socket close or request canceled exception
+     */
+    prepare(sql, arrP = []) {
         return new Promise((res, rej) => {
             var ret;
             var ok = this.handler.Prepare(sql, (errCode, errMsg) => {
-                if (cb) ret = cb(errCode, errMsg);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg
-                };
-                res(ret);
+                res({ ec: errCode, em: errMsg });
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Prepare canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.DB.ReqIds.idPrepare, canceled);
+            }, arrP, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.DB.ReqIds.idPrepare);
             }
         });
     }
 
     //Promise
-    beginTrans(isolation = exports.DB.TransIsolation.ReadCommited, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * Start a manual transaction with a given isolation asynchronously. Note the transaction will be associated with SocketPro
+     * client message queue if available to avoid possible transaction lose
+     * @param {int} isolation a transaction isolation. It defaults to exports.DB.TransactionIsolation.tiReadCommited
+     * @returns a promise for execution error information
+     * @throws A server, socket close or request canceled exception
+     */
+    beginTrans(isolation = exports.DB.TransIsolation.ReadCommited) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.BeginTrans(isolation, (errCode, errMsg) => {
-                if (cb) ret = cb(errCode, errMsg);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg
-                };
-                res(ret);
+                res({ ec: errCode, em: errMsg });
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'BeginTrans canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.DB.ReqIds.idBeginTrans, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.DB.ReqIds.idBeginTrans);
             }
         });
     }
 
     //Promise
-    endTrans(rp = exports.DB.RollbackPlan.rpDefault, cb = null, discarded = null) {
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+    /**
+     * End a manual transaction with a given rollback plan. Note the transaction will be associated with SocketPro client message queue
+     * if available to avoid possible transaction lose
+     * @param {int} rp a schedule about how included transactions should be rollback at server side. It defaults to exports.DB.RollbackPlan.rpDefault
+     * @returns a promise for execution error information
+     * @throws A server, socket close or request canceled exception
+     */
+    endTrans(rp = exports.DB.RollbackPlan.rpDefault) {
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.EndTrans(rp, (errCode, errMsg) => {
-                if (cb) ret = cb(errCode, errMsg);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg
-                };
-                res(ret);
+                res({ ec: errCode, em: errMsg });
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'EndTrans canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.DB.ReqIds.idEndTrans, canceled);
+            }, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.DB.ReqIds.idEndTrans);
             }
         });
     }
 
     //Promise
-    open(conn, cb = null, discarded = null) {
+    /**
+     * Open a database connection at server side asynchronously
+     * @param {string} conn a database connection string. The database connection string can be null, undefined or an empty string
+     * if its server side supports global database connection string
+     * @param {int} flags a set of flags transferred to server to indicate how to build database connection at server side. It defaults to zero
+     * @returns a promise for execution error information
+     * @throws A server, socket close or request canceled exception
+     */
+    open(conn, flags = 0) {
         assert(conn === null || conn === undefined || typeof conn === 'string');
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.Open(conn, (errCode, errMsg) => {
-                if (cb) ret = cb(errCode, errMsg);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg
-                };
-                res(ret);
+                res({ ec: errCode, em: errMsg });
             }, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Open canceled' : 'Connection closed');
-                rej(ret);
+                this.set_aborted(rej, exports.DB.ReqIds.idOpen, canceled);
+            }, flags, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
             });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.DB.ReqIds.idOpen);
             }
         });
     }
 
     //Promise
-    execute(sql_or_arrParam, rows = null, rh = null, cb = null, discarded = null, meta = true) {
+    /**
+     * Execute one SQL complex statement having multiple basic SQL statements or
+     * one or more sets of prepared statements with an array of parameter data asynchronously
+     * @param {string, [], or CUQueue} sql_or_arrParam an SQL statement, an array of parameter data or an instance of CUQueue containing an array of parameters
+     * @param {function} rows a callback for tracking record data or output parameter returned data
+     * @param {function} rh a callback for tracking row set of header column meta informations
+     * @param {boolean} meta a boolean value for better or more detailed column meta
+     * details such as unique, not null, primary first, and so on. It defaults to true
+     * @returns a promise for SQL execution error information
+     * @throws A server, socket close or request canceled exception
+     */
+    execute(sql_or_arrParam, rows = null, rh = null, meta = true) {
         assert(rows === null || rows === undefined || typeof rows === 'function');
         assert(rh === null || rh === undefined || typeof rh === 'function');
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
+        var sql = (typeof sql_or_arrParam === 'string');
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.Execute(sql_or_arrParam, (errCode, errMsg, affected, fails, oks, id) => {
-                if (cb) ret = cb(errCode, errMsg, affected, fails, oks, id);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg,
-                    aff: affected,
-                    oks: oks,
-                    fails: fails,
-                    lastId: id
-                };
-                res(ret);
+                res({ ec: errCode, em: errMsg, aff: affected, oks: oks, fails: fails, lastId: id });
             }, rows, rh, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'Execute canceled' : 'Connection closed');
-                rej(ret);
-            }, meta);
+                this.set_aborted(rej, sql ? exports.DB.ReqIds.idExecute : exports.DB.ReqIds.idExecuteParameters, canceled);
+            }, meta, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
+            });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, sql ? exports.DB.ReqIds.idExecute : exports.DB.ReqIds.idExecuteParameters);
             }
         });
     }
 
     //Promise
-    executeBatch(isolation, sql, paramBuff, rows = null, rh = null, rp = exports.DB.RollbackPlan.rpDefault, delimiter = ';', batchHeader = null, cb = null, discarded = null, meta = true, arrP = []) {
+    /**
+     * Execute a batch of SQL statements on one single call
+     * @param {int} isolation a value for manual transaction isolation. Specifically,
+     * there is no manual transaction around the batch SQL statements if it is exports.DB.TransIsolation.Unspecified
+     * @param {string} sql a SQL statement having a batch of individual SQL statements
+     * @param {[]} paramBuff an array of parameter data which will be bounded to previously prepared parameters.
+     * The array size can be 0 if the given batch SQL statement doesn't having any prepared statement
+     * @param {function} rows a callback for tracking final result
+     * @param {function} rh a callback for tracking row set of header column informations
+     * @param {string} delimiter delimiter a delimiter string used for separating the batch SQL statements into individual SQL statements
+     * at server side for processing. It defaults to ";"
+     * @param {function} batchHeader a callback for tracking batch start event
+     * @param {boolean} meta a boolean value for better or more detailed column meta details such as unique, not null, primary key, and so on. It defaults to true
+     * @param {int} rp a value for computing how included transactions should be rollback. It defaults to exports.DB.RollbackPlan.rpDefault
+     * @param {[]} arrP a given array of parameter informations which may be empty to some of database management systems
+     * @param {boolean} lastInsertId true if last insert id is hoped, and false if last insert id is not expected
+     * @returns final execution result by promise
+     * @throws A server, socket close or request canceled exception
+     */
+    executeBatch(isolation, sql, paramBuff = [], rows = null, rh = null, delimiter = ';', batchHeader = null, meta = true, rp = exports.DB.RollbackPlan.rpDefault, arrP = [], lastInsertId = true) {
         assert(sql && typeof sql === 'string');
         assert(rows === null || rows === undefined || typeof rows === 'function');
         assert(rh === null || rh === undefined || typeof rh === 'function');
         assert(batchHeader === null || batchHeader === undefined || typeof batchHeader === 'function');
-        assert(cb === null || cb === undefined || typeof cb === 'function');
-        assert(discarded === null || discarded === undefined || typeof discarded === 'function');
         return new Promise((res, rej) => {
-            var ret;
             var ok = this.handler.ExecuteBatch(isolation, sql, paramBuff, (errCode, errMsg, affected, fails, oks, id) => {
-                if (cb) ret = cb(errCode, errMsg, affected, fails, oks, id);
-                if (ret === undefined) ret = {
-                    ec: errCode,
-                    em: errMsg,
-                    aff: affected,
-                    oks: oks,
-                    fails: fails,
-                    lastId: id
-                };
-                res(ret);
+                res({ ec: errCode, em: errMsg, aff: affected, oks: oks, fails: fails, lastId: id });
             }, rows, rh, batchHeader, (canceled) => {
-                if (discarded) ret = discarded(canceled);
-                if (ret === undefined) ret = (canceled ? 'ExecuteBatch canceled' : 'Connection closed');
-                rej(ret);
-            }, rp, delimiter, arrP, meta);
+                this.set_aborted(rej, exports.DB.ReqIds.idExecuteBatch, canceled);
+            }, rp, delimiter, arrP, meta, lastInsertId, (errMsg, errCode, errWhere, id) => {
+                this.set_exception(rej, errMsg, errCode, errWhere, id);
+            });
             if (!ok) {
-                if (discarded) ret = discarded(false);
-                if (ret === undefined) ret = this.Socket.Error;
-                rej(ret);
+                this.raise(rej, exports.DB.ReqIds.idExecuteBatch);
             }
         });
     }
@@ -1628,6 +1921,25 @@ exports.CS = {
     }
 };
 
+exports.File = {
+    OpenOption: {
+        TRUNCACTED: 1,
+        APPENDED: 2,
+        SHARE_READ: 4,
+        SHARE_WRITE: 8
+    },
+
+    ReqIds: {
+        idDownload: 0x7F70,
+        idStartDownloading: 0x7F71,
+        idDownloading: 0x7F72,
+        idUpload: 0x7F73,
+        idUploading: 0x7F74,
+        idUploadCompleted: 0x7F75,
+        idUploadBackup: 0x7F76
+    }
+};
+
 //DB namespace
 exports.DB = {
     //pre-defined DB management systems
@@ -1759,7 +2071,7 @@ exports.Cache = {
     }
 };
 
-exports.CHandler = CHandler;
+//exports.CHandler = CHandler;
 
 class CJsManager {
     constructor(jsonConfig) {
@@ -2180,7 +2492,6 @@ class CJsManager {
         }
         pool.AutoConn = pc.AutoConn;
         pool.QueueName = pc.Queue;
-        pool.AutoMerge = pc.AutoMerge;
         pool.ConnTimeout = pc.ConnTimeout;
         pool.RecvTimeout = pc.RecvTimeout;
         jh[keyPool].Pool = pool;
@@ -2190,9 +2501,7 @@ class CJsManager {
             sessions.push(jcObject.Hosts[key]);
         }
         var ok = pool.Start(sessions, sessions.length);
-        if (!ok) {
-            throw JSON.stringify(pool.Error);
-        }
+        pool.AutoMerge = pc.AutoMerge;
         return pool;
     }
     GetHandler(keyPool) {

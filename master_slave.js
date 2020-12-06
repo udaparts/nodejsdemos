@@ -1,19 +1,10 @@
 //loading SocketPro adapter (nja.js + njadapter.node) for nodejs
 var SPA = require('nja.js');
-var cs = SPA.CS; //CS == Client side
 
-//create a global socket pool object
-master = cs.newPool(SPA.SID.sidMysql, 'mysqldb'); //or sidOdbc, sidSqlite
+//var spManager = SPA.GetManager();
+//console.log(JSON.stringify(spManager.Config));
 
-//create a connection context
-var cc_master = cs.newCC('windesk', 20902, 'root', 'Smash123');
-
-//start a socket pool having two sessions to a remote master server
-if (!master.Start(cc_master, 2)) {
-    console.log(master.Error);
-    return;
-}
-var db = master.Seek(); //seek an async DB handler from master pool
+var master = SPA.GetSpPool('masterdb');
 var cache = master.Cache;
 
 console.log('');
@@ -57,31 +48,25 @@ console.log('SELECT * FROM sakila.actor WHERE actor_id NOT IN(24,9,10) ORDER BY 
 sub = tbl.NotIn(0, [24, 9, 10]);
 console.log(sub.Data);
 
-//create slave pool from master
-var slave = master.NewSlave();
-var cc_slave = cs.newCC('localhost', 20902, 'root', 'Smash123');
-//start a socket pool having four sessions to remote slave servers
-if (!slave.Start([cc_slave, cc_master], 4)) {
-    console.log(slave.Error);
-    return;
-}
-db = slave.Seek();
+var db = SPA.GetSpHandler('slavedb0');
 console.log('');
-console.log('SELECT curtime();SELECT * FROM company');
-if (!db.Execute('SELECT curtime();SELECT * FROM company', (res, err, affected, fails, oks, id) => {
-        console.log({
-            ec: res,
-            em: err,
-            aff: affected,
-            oks: oks,
-            fails: fails,
-            lastId: id
-        });
-    }, data => {
-        console.log(data);
-    }, meta => {
-        console.log(meta);
-    })) {
+console.log('SELECT curtime();SELECT * FROM sakila.language');
+if (!db.Execute('SELECT curtime();SELECT * FROM sakila.language', (res, err, affected, fails, oks, id) => {
+    console.log({ec: res, em: err, aff: affected, oks: oks, fails: fails, lastId: id});
+}, (data, proc, cols) => {
+    console.log({ data: data, proc: proc, cols: cols });
+}, meta => {
+    console.log(meta);
+})) {
     console.log(db.Socket.Error);
     return;
 }
+
+var hw = SPA.GetSpHandler('my_hello_world');
+// send hello world requests
+
+var sq = SPA.GetSpHandler('my_queue');
+// enqueue and dequeue
+
+var file = SPA.GetSpHandler('my_file');
+// file exchange between nodejs and remote server
