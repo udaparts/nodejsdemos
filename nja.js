@@ -477,6 +477,10 @@ class CSocketPool {
         return this.pool.getStarted();
     }
 
+    get Threads() {
+        return this.pool.getThreads();
+    }
+
     get Cache() {
         var cache = this.pool.getCache();
         if (cache)
@@ -639,9 +643,10 @@ class CSocketPool {
         return h;
     }
 
-    Start(cc, sessions) {
+    Start(cc, sessions, threads = 1) {
         assert(typeof sessions === 'number');
-        return this.pool.Start(cc, sessions);
+        assert(typeof threads === 'number' || threads === null || threads === undefined);
+        return this.pool.Start(cc, sessions, threads);
     }
 
     Shutdown() {
@@ -782,20 +787,35 @@ class CHandler {
      * Send a request onto a remote server for processing, and return immediately without blocking
      * @param {unsigned short} reqId An unique request id within a service handler
      * @param {CUQueue, null or undefined} buff null, undefined or an instance of CUQueue
+     * @param {function} cb an optional callback which takes an instance of CUQueue containing data and request id.
+     *     It is noted that the optional callback may increase performance.
+     *     Otherwise, promise will get an instance of CUQueue containing data and request id.
      * @returns A promise for an instance of CUQueue
      * @throws A server, socket close or request canceled exception
      */
-    sendRequest(reqId, buff) {
+    sendRequest(reqId, buff, cb = null) {
         if (reqId <= exports.BaseID.idReservedTwo)
             throw 'Request id must be larger than 0x2001';
         return new Promise((res, rej) => {
-            var ok = this.handler.SendRequest(reqId, buff, (q, id) => {
-                res(q, id);
-            }, (canceled, id) => {
+            var rh, delay;
+            if (typeof cb === 'function') {
+                //this will make performance better about 6%
+                delay = false;
+                rh = (q, id) => {
+                    res(cb(q, id), id);
+                }
+            }
+            else {
+                delay = true;
+                rh = (q, id) => {
+                    res(q, id);
+                }
+            }
+            var ok = this.handler.SendRequest(reqId, buff, rh, (canceled, id) => {
                 this.set_aborted(rej, reqId, canceled);
             }, (errMsg, errCode, errWhere, id) => {
                 this.set_exception(rej, errMsg, errCode, errWhere, id);
-            });
+            }, delay);
             if (!ok) {
                 this.raise(rej, reqId);
             }
@@ -2261,7 +2281,9 @@ class CJsManager {
             if (!obj || typeof obj !== 'object') {
                 throw 'A pair of key/Pool context expected';
             }
-            obj.Threads = 1;
+            if (!obj.Threads || typeof obj.Threads !== 'number') {
+                obj.Threads = 1;
+            }
             var queue = '';
             if (obj.Queue !== undefined) {
                 if (typeof obj.Queue === 'string') {
@@ -2365,7 +2387,12 @@ class CJsManager {
                     s.PoolType = 1;
                     s.SvsId = obj.SvsId;
                     s.DefaultDb = obj.DefaultDb;
-                    s.Threads = 1;
+                    if (one.Threads && typeof one.Threads === 'number') {
+                        s.Threads = one.Threads;
+                    }
+                    else {
+                        s.Threads = 1;
+                    }
                     s.Queue = '';
                     if (one.Queue !== undefined) {
                         if (typeof one.Queue === 'string') {
@@ -2500,7 +2527,7 @@ class CJsManager {
             var key = pc.Hosts[n];
             sessions.push(jcObject.Hosts[key]);
         }
-        var ok = pool.Start(sessions, sessions.length);
+        var ok = pool.Start(sessions, sessions.length, pc.Threads);
         pool.AutoMerge = pc.AutoMerge;
         return pool;
     }
