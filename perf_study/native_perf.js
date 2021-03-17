@@ -1,7 +1,7 @@
 const mysqlx = require('@mysql/xdevapi');
 
 const client = mysqlx.getClient(
-    { host: 'windesk', port: 33060, user: 'root', password: 'Smash123', schema: 'sakila'},
+    { host: 'windesk', port: 33060, user: 'root', password: 'Smash123', schema: 'sakila' },
     { pooling: { enabled: true, maxIdleTime: 30000, maxSize: 3, queueTimeout: 10000 } }
 );
 
