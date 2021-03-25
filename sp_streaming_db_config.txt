@@ -1,5 +1,0 @@
-main_threads=1
-disable_ipv6=0
-cached_tables=sakila.actor;sakila.language;sakila.country;sakila.category
-services=uasyncqueue.dll
-port=20902
